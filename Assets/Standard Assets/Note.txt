@@ -1,0 +1,1 @@
+These are just the legacy image effects, I was playing with the possibility of rendering out icons, and was experimenting with outlines and AO for that. Decided not to bother, at least until/unless I have a practical use for it.

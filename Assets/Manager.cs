@@ -32,6 +32,15 @@ public enum Flags
 	Unknown32 = 32, // 0x20
 }
 
+// Using Unity's own Mesh class in OBJ exporting is really slow for some reason, so here's a lightweight class that just holds the data we want and doesn't do anything mysterious
+public class CustomMesh
+{
+	public Vector3[] vertices;
+	public Vector3[] normals;
+	public Vector2[] uv;
+	public int[] triangles;
+}
+
 public class Manager : MonoBehaviour
 {
 	// inspector
@@ -43,6 +52,7 @@ public class Manager : MonoBehaviour
 	int currentFile = 0;
 	DateTime startTime;
 	TimeSpan timeSpan;
+	int garbageCounter = 0;
 	
 	// user input
 	string inputDirectory = @"C:\Some\Directory";
@@ -50,7 +60,7 @@ public class Manager : MonoBehaviour
 	ConversionModes conversionMode;
 	
 	// reset these per frame/brick
-	List<Mesh> meshes = new List<Mesh>();
+	List<CustomMesh> meshes = new List<CustomMesh>();
 	List<GameObject> meshGameObjects = new List<GameObject>();
 	string brickID;
 	bool brickHasUVs = false;
@@ -109,6 +119,7 @@ public class Manager : MonoBehaviour
 					PlayerPrefs.SetString("Input Directory", inputDirectory);
 					PlayerPrefs.SetString("Output Directory", outputDirectory);
 					PlayerPrefs.SetInt("Conversion Mode", (int)conversionMode);
+					garbageCounter = 0;
 					QualitySettings.vSyncCount = 0; // disable vsync while converting so we don't limit conversion speed to framerate
 					startTime = DateTime.Now;
 					state = State.Converting;
@@ -117,7 +128,7 @@ public class Manager : MonoBehaviour
 			case State.Converting:
 				GUI.Box(new Rect(10, 10, 250, 70), "");
 				GUI.Label(new Rect(15, 10, 240, 25), string.Format("Converted brick {0} ({1} of {2})", brickID, currentFile, inputFiles.Length));
-				GUI.Label(new Rect(15, 30, 240, 25), string.Format("Time: {0:D2}:{1:D2}:{2:D2}", timeSpan.Hours, timeSpan.Minutes, timeSpan.Seconds));
+				GUI.Label(new Rect(15, 30, 240, 25), string.Format("Time: {0:D2}:{1:D2}", timeSpan.Minutes, timeSpan.Seconds));
 				
 				string nextBrickID = Path.GetFileNameWithoutExtension(inputFiles[currentFile] + 1);
 				GUI.Label(new Rect(15, 50, 240, 25), string.Format("Now converting brick {0}...", nextBrickID));
@@ -125,7 +136,7 @@ public class Manager : MonoBehaviour
 			case State.Done:
 				GUI.Box(new Rect(10, 10, 250, 70), "");
 				GUI.Label(new Rect(15, 10, 240, 25), string.Format("Converted brick {0} ({1} of {2})", brickID, currentFile, inputFiles.Length));
-				GUI.Label(new Rect(15, 30, 240, 25), string.Format("Time: {0:D2}:{1:D2}:{2:D2}", timeSpan.Hours, timeSpan.Minutes, timeSpan.Seconds));
+				GUI.Label(new Rect(15, 30, 240, 25), string.Format("Time: {0:D2}:{1:D2}", timeSpan.Minutes, timeSpan.Seconds));
 				
 				if (GUI.Button(new Rect(15, 50, 240, 25), "Back"))
 				{
@@ -148,24 +159,21 @@ public class Manager : MonoBehaviour
 			// RESET FROM LAST FRAME
 			
 			// nuke the bricks in the scene
-			// dunno if destroying the meshes on their meshfilters is redundant with destroying the ones in the meshes list but whatever
 			foreach (GameObject gameObjectToNuke in meshGameObjects)
 			{
 				Destroy(gameObjectToNuke.GetComponent<MeshFilter>().mesh);
 				Destroy(gameObjectToNuke);
 			}
 			meshGameObjects.Clear();
-			
-			// shrug
-			foreach (Mesh mesh in meshes)
-			{
-				Destroy(mesh);
-			}
 			meshes.Clear();
 			
-			// pls
-			Resources.UnloadUnusedAssets();
-			System.GC.Collect();
+			garbageCounter++;
+			if (garbageCounter == 60) // arbitrary number that seems to work fine
+			{
+				Resources.UnloadUnusedAssets();
+				System.GC.Collect();
+				garbageCounter = 0;
+			}
 			
 			// and reset the other stuff
 			brickID = Path.GetFileNameWithoutExtension(inputFiles[currentFile]);
@@ -195,7 +203,7 @@ public class Manager : MonoBehaviour
 			
 			// SHOW THE MESHES IN THE SCENE, EXPORT, DONE
 			
-			foreach (Mesh mesh in meshes)
+			foreach (CustomMesh mesh in meshes)
 			{
 				meshGameObjects.Add(PlopMeshIntoScene(mesh));
 			}
@@ -210,78 +218,85 @@ public class Manager : MonoBehaviour
 		}
 	}
 	
-	GameObject PlopMeshIntoScene(Mesh mesh)
+	GameObject PlopMeshIntoScene(CustomMesh customMesh)
 	{
 		GameObject newGameObject = new GameObject();
 		newGameObject.transform.localScale = new Vector3(-1.0f, 1.0f, 1.0f);
 		MeshFilter meshFilter = newGameObject.AddComponent<MeshFilter>();
 		MeshRenderer meshRenderer = newGameObject.AddComponent<MeshRenderer>();
 		meshRenderer.material = brickMaterial;
-		meshFilter.mesh = mesh;
+		meshFilter.mesh = new Mesh();
+		meshFilter.mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32; // for meshes with more than 65535 verts (baseplates and such)
+		meshFilter.mesh.vertices = customMesh.vertices;
+		meshFilter.mesh.normals = customMesh.normals;
+		meshFilter.mesh.uv = customMesh.uv;
+		meshFilter.mesh.triangles = customMesh.triangles;
 		return newGameObject;
 	}
 	
-	Mesh LoadMesh(string filePath)
+	CustomMesh LoadMesh(string filePath)
 	{
+		CustomMesh mesh = new CustomMesh();
 		FileStream fileStream = new FileStream(filePath, FileMode.Open);
 		BinaryReader binaryReader = new BinaryReader(fileStream);
 		
+		// read basic mesh info
 		binaryReader.BaseStream.Position = 4; // skip header
 		UInt32 vertexCount = binaryReader.ReadUInt32();
 		UInt32 indexCount = binaryReader.ReadUInt32();
 		Flags flags = (Flags)binaryReader.ReadUInt32();
 		//Debug.Log(Path.GetFileName(filePath) + " flags: " + flags);
 		
-		// vertices
-		Vector3[] vertices = new Vector3[vertexCount];
+		// read vertices
+		mesh.vertices = new Vector3[vertexCount];
 		for (int i = 0; i < vertexCount; i++)
 		{
-			vertices[i] = new Vector3(binaryReader.ReadSingle(), binaryReader.ReadSingle(), binaryReader.ReadSingle());
+			mesh.vertices[i] = new Vector3(binaryReader.ReadSingle(), binaryReader.ReadSingle(), binaryReader.ReadSingle());
 		}
 		
-		// normals
-		Vector3[] normals = new Vector3[vertexCount];
+		// read normals if they exist
+		mesh.normals = new Vector3[vertexCount];
 		if ((flags & Flags.Normals) == Flags.Normals)
 		{
 			for (int i = 0; i < vertexCount; i++)
 			{
-				normals[i] = new Vector3(binaryReader.ReadSingle(), binaryReader.ReadSingle(), binaryReader.ReadSingle());
+				mesh.normals[i] = new Vector3(binaryReader.ReadSingle(), binaryReader.ReadSingle(), binaryReader.ReadSingle());
 			}
 		}
-		// dummy normals, not aware of any g files that lack normals but it's theoretically possible
+		// if no normals exist, use dummy normals - not aware of any g files that lack normals but it's theoretically possible
 		else
 		{
 			Debug.LogWarning(Path.GetFileName(filePath) + " has no normals");
 			for (int i = 0; i < vertexCount; i++)
 			{
-				normals[i] = Vector3.up;
+				mesh.normals[i] = Vector3.up;
 			}
 		}
 		
-		// uv
-		Vector2[] uv = new Vector2[vertexCount];
+		// read UVs if they exist
+		mesh.uv = new Vector2[vertexCount];
 		if ((flags & Flags.UV) == Flags.UV)
 		{
 			brickHasUVs = true;
 			for (int i = 0; i < vertexCount; i++)
 			{
-				uv[i] = new Vector2(binaryReader.ReadSingle(), -binaryReader.ReadSingle() + 1.0f);
+				mesh.uv[i] = new Vector2(binaryReader.ReadSingle(), -binaryReader.ReadSingle() + 1.0f);
 			}
 		}
-		// set UVs to zero if mesh lacks them (will only be used if other meshes for the brick *do* use UVs)
+		// set UVs to zero if this mesh lacks them (will only be used if other meshes for the brick *do* have UVs)
 		else
 		{
 			for (int i = 0; i < vertexCount; i++)
 			{
-				uv[i] = Vector2.zero;
+				mesh.uv[i] = Vector2.zero;
 			}
 		}
 		
-		// triangles
-		int[] triangles = new int[indexCount];
+		// read triangles
+		mesh.triangles = new int[indexCount];
 		for (int i = 0; i < indexCount; i++)
 		{
-			triangles [i] = (int)binaryReader.ReadUInt32();
+			mesh.triangles [i] = (int)binaryReader.ReadUInt32();
 		}
 		
 		// done reading
@@ -289,13 +304,6 @@ public class Manager : MonoBehaviour
 		// according to some old stackoverflow post just closing the reader should (might) be enough, but just in case
 		fileStream.Close();
 		
-		// return mesh
-		Mesh mesh = new Mesh();
-		mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32; // for any super huge meshes with more than 65535 verts (baseplates and such)
-		mesh.vertices = vertices;
-		mesh.normals = normals;
-		mesh.uv = uv;
-		mesh.triangles = triangles;
 		return mesh;
 	}
 	
@@ -339,7 +347,7 @@ public class Manager : MonoBehaviour
 		//Debug.Log("Saved file " + brickID + ".obj");
 	}
 	
-	string MeshToString(Mesh m, bool includeUVs)
+	string MeshToString(CustomMesh m, bool includeUVs)
 	{
 		StringBuilder sb = new StringBuilder();
 		
@@ -386,7 +394,7 @@ public class Manager : MonoBehaviour
 	{
 		StringBuilder sb = new StringBuilder();
 		
-		foreach (Mesh m in meshes)
+		foreach (CustomMesh m in meshes)
 		{
 			foreach(Vector3 v in m.vertices)
 			{
@@ -394,7 +402,7 @@ public class Manager : MonoBehaviour
 			}
 		}
 		sb.Append("\n");
-		foreach (Mesh m in meshes)
+		foreach (CustomMesh m in meshes)
 		{
 			foreach(Vector3 v in m.normals)
 			{
@@ -402,7 +410,7 @@ public class Manager : MonoBehaviour
 			}
 		}
 		sb.Append("\n");
-		foreach (Mesh m in meshes)
+		foreach (CustomMesh m in meshes)
 		{
 			for (int i=0;i<m.triangles.Length;i+=3)
 			{
@@ -417,7 +425,7 @@ public class Manager : MonoBehaviour
 	
 	// not using but could be useful if we do duplicate vertex merging at some point (existing code for that from the 3DXML project doesn't like it)
 	/*
-	Mesh CombineMeshes()
+	CustomMesh CombineMeshes()
 	{
 		int blahStartIndex = 0;
 		
@@ -425,7 +433,7 @@ public class Manager : MonoBehaviour
 		List<Vector3> normals = new List<Vector3>();
 		List<int> triangles = new List<int>();
 		
-		foreach (Mesh m in meshes)
+		foreach (CustomMesh m in meshes)
 		{
 			foreach(Vector3 v in m.vertices)
 			{
@@ -433,7 +441,7 @@ public class Manager : MonoBehaviour
 			}
 		}
 		
-		foreach (Mesh m in meshes)
+		foreach (CustomMesh m in meshes)
 		{
 			foreach(Vector3 v in m.normals)
 			{
@@ -441,7 +449,7 @@ public class Manager : MonoBehaviour
 			}
 		}
 		
-		foreach (Mesh m in meshes)
+		foreach (CustomMesh m in meshes)
 		{
 			for (int i = 0; i < m.triangles.Length; i++)
 			{
@@ -450,8 +458,7 @@ public class Manager : MonoBehaviour
 			blahStartIndex += m.vertices.Length;
 		}
 		
-		Mesh mesh = new Mesh();
-		mesh.indexFormat = UnityEngine.Rendering.IndexFormat.UInt32; // for any super huge meshes with more than 65535 verts (baseplates and such)
+		CustomMesh mesh = new CustomMesh();
 		mesh.vertices = vertices.ToArray();
 		mesh.normals = normals.ToArray();
 		mesh.triangles = triangles.ToArray();
